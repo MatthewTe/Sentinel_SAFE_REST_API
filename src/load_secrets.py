@@ -11,7 +11,7 @@ def load_secrets(env: str) -> Secrets:
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_DEV"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_DEV"),
             "minio_url": os.environ.get("MINIO_URL_DEV"), 
-            "sqlite_uri": os.environ.get("SQLITE_URL_DEV")
+            "neo4j_url": os.environ.get("API_NEO4J_URL_DEV")
         }
     elif env == "prod":
         logger.info("Loaded in prod secrets")
@@ -21,7 +21,7 @@ def load_secrets(env: str) -> Secrets:
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_PROD"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_PROD"),
             "minio_url": os.environ.get("MINIO_URL_PROD"), 
-            "sqlite_uri": os.environ.get("SQLITE_URL_PROD")
+            "neo4j_url": os.environ.get("API_NEO4J_URL_PROD")
         }
 
     return secrets

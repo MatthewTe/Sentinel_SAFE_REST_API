@@ -18,4 +18,4 @@ class Secrets(TypedDict):
     minio_secret_key: str
     copernicus_username: str
     copernicus_password: str
-    sqlite_uri: str
+    neo4j_rest_api: str

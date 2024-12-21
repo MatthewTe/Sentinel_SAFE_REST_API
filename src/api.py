@@ -3,6 +3,7 @@ from custom_types import AOI_Geojson, Secrets
 from load_secrets import load_secrets
 
 import requests
+import pprint
 import sqlalchemy as sa
 from shapely import Polygon
 from minio import Minio
@@ -13,20 +14,31 @@ import shapely
 import geopandas as gpd
 import io
 import os
+import sqlite3
 
-def get_sqlite_engine(uri: str) -> sa.engine.Engine:
+def get_sqlite_engine(uri: str, enable_spatial: bool = False) -> sa.engine.Engine:
+    logger.info(f"SQLITE Version:")
+    logger.info(sqlite3.sqlite_version)
+    logger.info(sqlite3.version)
 
     sqlite_engine: sa.engine.Engine = sa.create_engine(uri, echo=True)
     logger.info(f"Creating connection to the SQLITE database")
 
+    engine = sa.create_engine(uri)
+
+    if enable_spatial:
+        with engine.connect() as conn:
+            sqlite_conn = conn.connection
+            sqlite_conn.enable_load_extension(True)
+            
+            sqlite_conn.execute("SELECT load_extension('mod_spatialite');")
+            logger.info("Executing the spatialite extension loading")
+
+            sqlite_conn.execute("SELECT InitSpatialMetadata();")
+            logger.info("Initializing spatialite extension")
+
+
     with sqlite_engine.connect() as conn, conn.begin():
-
-        conn.execute(sa.text("SELECT load_extension('mod_spatialite');"))
-        logger.info("Executing the spatialite extension loading")
-
-        conn.execute(sa.text("SELECT InitSpatialMetadata();"))
-        logger.info("Initalizing spatialite extension")
-
         conn.execute(sa.text("""
             CREATE TABLE IF NOT EXISTS copernicus_ingested_catalog (
                 Id TEXT PRIMARY KEY,
@@ -48,16 +60,17 @@ def get_sqlite_engine(uri: str) -> sa.engine.Engine:
         ))
         logger.info("Ran copernicus_ingested_catalog table creation if it does not exists")
 
-        column_exists = conn.execute(sa.text("""
-            SELECT COUNT (*) 
-            FROM geometry_columns
-            WHERE f_table_name = 'copernicus_ingested_catalog' AND f_geometry_column = 'geometry';
-        """)).scalar()
-        logger.info("Checked copernicus_ingested_catalog table for the persence of a geometry column")
+        if enable_spatial:
+            column_exists = conn.execute(sa.text("""
+                SELECT COUNT (*) 
+                FROM geometry_columns
+                WHERE f_table_name = 'copernicus_ingested_catalog' AND f_geometry_column = 'geometry';
+            """)).scalar()
+            logger.info("Checked copernicus_ingested_catalog table for the persence of a geometry column")
 
-        if not column_exists:
-            conn.execute(sa.text("SELECT AddGeometryColumn('copernicus_ingested_catalog', 'geometry', 4326, 'POLYGON', 2);"))
-            logger.info("geometry column did not exist - adding geometry column for polygon called 'geometry'")
+            if not column_exists:
+                conn.execute(sa.text("SELECT AddGeometryColumn('copernicus_ingested_catalog', 'geometry', 4326, 'POLYGON', 2);"))
+                logger.info("geometry column did not exist - adding geometry column for polygon called 'geometry'")
 
     return sqlite_engine
 
@@ -101,7 +114,11 @@ def extract_sentinel_tiles_from_aoi(user_input_aoi: AOI_Geojson) -> pd.DataFrame
         logger.warning(f"No data take tiles found from any of the AOIs provided.")
         return None
 
-    all_tiles_df = all_tiles_df.duplicated(subset=['Id'], keep="first")
+    all_tiles_df.duplicated(subset=['Id'], keep="first")
+
+    logger.info("All tiles found for the AOIs provided:")
+    logger.info(all_tiles_df)
+
     return all_tiles_df
 
 def generate_geometry_from_catalogy_dict(geofootprint):
@@ -112,7 +129,7 @@ def ingest_SAFE_files(static_client: Minio, unique_copernicus_catalog_gdf: gpd.G
 
     uploaded_copernicus_catalog_ids = []
     for index, row in unique_copernicus_catalog_gdf.iterrows():
-
+        
         logger.info(f"Making request for compressed SAFE catalog for entry {row['Id']}")
         url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({row['Id']})/$value"
         headers = {"Authorization": f"Bearer {access_token}"}
@@ -120,14 +137,14 @@ def ingest_SAFE_files(static_client: Minio, unique_copernicus_catalog_gdf: gpd.G
         session = requests.Session()
         session.headers.update(headers)
 
-        bucket_name = "test-bucket"
+        bucket_name = "sentinel-2-data"
         logger.info(f"Using bucket name {bucket_name}")
 
         memory_stream = io.BytesIO()
         zipped_response = session.get(url, headers=headers, stream=True)
 
         for chunk in zipped_response.iter_content(chunk_size=8192):
-            logger.info(f"Wrote chunk of SAFE data for tile {row['Id']} to in-memory buffer")
+            #logger.info(f"Wrote chunk of SAFE data for tile {row['Id']} to in-memory buffer")
             memory_stream.write(chunk)
 
         memory_stream.seek(0)
@@ -151,12 +168,76 @@ def ingest_SAFE_files(static_client: Minio, unique_copernicus_catalog_gdf: gpd.G
             logger.error(f"Error in uploading tile {row['Id']} to blob storage. Skipping catalog tile...")
             logger.error(e.with_traceback(None))
             continue
-    
+
     logger.info(f"Tile Ids processed and added to que: {uploaded_copernicus_catalog_ids}")
     if len(uploaded_copernicus_catalog_ids) != len(unique_copernicus_catalog_gdf):
         logger.warning(f"There is a difference between the input tiles and the tiles that were processed and uploaded. Input: {len(unique_copernicus_catalog_gdf)} Output: {len(uploaded_copernicus_catalog_ids)}")
 
     return uploaded_copernicus_catalog_ids
+
+def determine_unique_records(catalog_df: pd.DataFrame | gpd.GeoDataFrame, secrets: Secrets) -> pd.DataFrame | gpd.GeoDataFrame:
+    try:
+        current_catalog_ids = ",".join([catalog_id for catalog_id in catalog_df['Id'].to_list()])
+        unique_catalog_response = requests.get(f"{secrets['neo4j_url']}/v1/api/exists", params={'post_ids': current_catalog_ids})
+        unique_catalog_response.raise_for_status()
+        unique_catalog_json: list[dict] = unique_catalog_response.json()
+        logger.info(f"Response from unique query: \n")
+        pprint.pprint(unique_catalog_json)
+
+    except requests.HTTPError as exception:
+        logger.exception(f"Error in checking existing catalog nodes from API {exception}")
+        return None
+    
+    duplicate_ids: list[str] = [post["id"] for post in unique_catalog_json if post['exists'] == True]
+
+    unique_catalog_df = catalog_df[~catalog_df['Id'].isin(duplicate_ids)]
+    logger.info(f"Before checking the API there were {len(catalog_df)}. After checking the API there were {len(unique_catalog_df)}")
+
+    return unique_catalog_df
+
+def insert_uploaded_SAFE_tiles(inserted_copernicus_catalog_gdf: gpd.GeoDataFrame, secrets: Secrets) -> dict:
+
+    uploaded_SAFE_nodes = []
+    for _, row in inserted_copernicus_catalog_gdf.iterrows():
+
+        logger.info(f"Appending row {row['Id']} to the node lists")
+        uploaded_SAFE_nodes.append({
+                "type":"node",
+                "query_type":"CREATE",
+                "labels": ['Metadata', 'Record', "SAFE", "Sentinel", "Imagery"],
+                "properties": {
+                    "id": row["Id"],
+                    "name": row["Name"],
+                    "collection_start_date": row['ContentDate']['Start'],
+                    "collection_end_date": row['ContentDate']['End'],
+                    "content_type": row["ContentType"],
+                    "content_length": row["ContentLength"],
+                    "origin_date": row["OriginDate"],
+                    "publication_date": row["PublicationDate"],
+                    "eviction_date": row["EvictionDate"],
+                    "modification_date": row["ModificationDate"],
+                    "s3_path": row["S3Path"],
+                    "footprint": row["Footprint"],
+                }
+            })
+
+    try:
+        pprint.pprint(uploaded_SAFE_nodes)
+        copernicus_catalog_creation_response = requests.post(f"{secrets['neo4j_url']}/v1/api/run_query", json=uploaded_SAFE_nodes)
+        copernicus_catalog_creation_response.raise_for_status()
+        created_catalog_nodes = copernicus_catalog_creation_response.json()
+        logger.info(f"Inserterd {len(created_catalog_nodes)} SAFE catalogs into the database")
+        
+        return created_catalog_nodes
+
+    except requests.HTTPError as e:
+        logger.error(
+        f"""Unable to create catalog nodes. Request returned with error: {str(e)} \n
+            - {copernicus_catalog_creation_response.content}  \n
+        """)
+        return None
+
+
 
 def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
 
@@ -165,42 +246,34 @@ def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
     copernicus_catalog_df['geometry'] = copernicus_catalog_df['Footprint'].apply(lambda x: generate_geometry_from_catalogy_dict(x))
     copernicus_catalog_gdf: gpd.GeoDataFrame = gpd.GeoDataFrame(copernicus_catalog_df, geometry="geometry", crs=4326)
     
-    sqlite_engine = get_sqlite_engine(env_secrets['sqlite_uri'])
+    unique_copernicus_catalog_gdf = determine_unique_records(copernicus_catalog_gdf, env_secrets)
 
-    with sqlite_engine.connect() as conn, conn.begin():
-        existing_ids_df: pd.DataFrame = pd.read_sql(sa.text("SELECT Id FROM copernicus_ingested_catalog"), con=conn)
-        logger.info(f"Ids queried from database {existing_ids_df['Id']}")
+    # Step 3: Ingesting all of the items to the minio application:
+    client = Minio(env_secrets['minio_url'], access_key=env_secrets['minio_access_key'], secret_key=env_secrets['minio_secret_key'], secure=False)
+    logger.info(f"Created minio client")
 
-        unique_copernicus_catalog_gdf: pd.DataFrame = copernicus_catalog_gdf[~copernicus_catalog_gdf['Id'].isin(existing_ids_df['Id'])]
-        logger.info(f"Total length of catalog df: {len(copernicus_catalog_gdf)}")
-        logger.info(f"Unique catalog tiles to ingest: {len(unique_copernicus_catalog_gdf)}")
+    data = {
+        "client_id": "cdse-public",
+        "username": env_secrets["copernicus_username"],
+        "password": env_secrets['copernicus_password'],
+        "grant_type": "password"
+    }
+    auth_response = requests.post(
+        "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+        data=data
+    ).json()
+    access_token = auth_response['access_token']
 
-        # Step 3: Ingesting all of the items to the minio application:
-        client = Minio(env_secrets['minio_url'], access_key=env_secrets['minio_access_key'], secret_key=env_secrets['minio_secret_key'], secure=False)
-        logger.info(f"Created minio client")
+    ingested_copernicus_ids: list[str] = ingest_SAFE_files(client, unique_copernicus_catalog_gdf, access_token)
+    ingested_copernicus_catalog_gdf = unique_copernicus_catalog_gdf[unique_copernicus_catalog_gdf["Id"].isin(ingested_copernicus_ids)]
 
-        data = {
-            "client_id": "cdse-public",
-            "username": env_secrets["copernicus_username"],
-            "password": env_secrets['copernicus_password'],
-            "grant_type": "password"
-        }
-        auth_response = requests.post(
-            "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
-            data=data
-        ).json()
-        access_token = auth_response['access_token']
+    logger.info(f"Copernicus datasets that have been ingested: {ingested_copernicus_ids}")
+    ingested_copernicus_catalog_gdf.drop(columns=['@odata.mediaContentType', 'geometry'], inplace=True)
+    logger.info(ingested_copernicus_catalog_gdf)
 
-        ingested_copernicus_ids: list[str] = ingest_SAFE_files(client, unique_copernicus_catalog_gdf, access_token)
-        ingested_copernicus_catalog_gdf = unique_copernicus_catalog_gdf[unique_copernicus_catalog_gdf["Id"].isin(ingested_copernicus_ids)]
-
-        print(f"Copernicus datasets that have been ingested: {ingested_copernicus_ids}")
-        ingested_copernicus_catalog_gdf.drop(columns=['@odata.mediaContentType', 'geometry'], inplace=True)
-        print(ingested_copernicus_catalog_gdf)
-
-        ingested_copernicus_catalog_gdf.to_sql("copernicus_ingested_catalog", con=conn, if_exists="append", index=False)
-        print("Done!")
-        
-        df = pd.read_sql(sa.text("SELECT * FROM copernicus_ingested_catalog"), con=conn)
-
-        print(df)
+    uploaded_SAFE_nodes_response: dict | None = insert_uploaded_SAFE_tiles(ingested_copernicus_catalog_gdf, env_secrets)
+    if uploaded_SAFE_nodes_response is None:
+        logger.error(f"Unable to insert tracking nodes into graph database")
+    else:
+        logger.info(f"Uploaded all ingested SAFE nodes to graph database")
+        pprint.pprint(uploaded_SAFE_nodes_response) 
