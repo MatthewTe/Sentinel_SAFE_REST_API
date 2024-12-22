@@ -322,6 +322,13 @@ def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
 
     # Step 3: Ingesting all of the items to the minio application:
     client = Minio(env_secrets['minio_url'], access_key=env_secrets['minio_access_key'], secret_key=env_secrets['minio_secret_key'], secure=False)
+    geospatial_bucket_found = client.bucket_exists("sentinel-2-data")
+    if not geospatial_bucket_found:
+        client.make_bucket("sentinel-2-data")
+        logger.info("Created bucket", "geospatial_bucket")
+    else:
+        logger.info("Bucket", "sentinel-2-data", "already exists") 
+
     logger.info(f"Created minio client")
 
     data = {
