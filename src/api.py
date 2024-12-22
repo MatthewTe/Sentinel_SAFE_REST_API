@@ -26,7 +26,7 @@ def update_insert_geometry_parquet_metadata(gdf_to_insert: gpd.GeoDataFrame, cli
     else:
         logger.info("Bucket", "sentinel-2-data", "already exists") 
     
-    gdf_to_insert['local_blob_storage_path'] = gdf_to_insert['Id'].apply(lambda x: f"{x}.SAFE.zip")
+    gdf_to_insert['local_blob_storage_path'] = gdf_to_insert['Id'].apply(lambda x: f"{x}/SAFE.zip")
 
     # Check to see if the parquet file exists:
     try:
@@ -222,7 +222,7 @@ def ingest_raw_SAFE_files_blob(static_client: Minio, unique_copernicus_catalog_g
         try:
             static_client.put_object(
                 bucket_name=bucket_name,
-                object_name=f"{row['Id']}.SAFE.zip",
+                object_name=f"{row['Id']}/SAFE.zip",
                 data=memory_stream,
                 length=memory_stream.getbuffer().nbytes,
                 content_type="application/zip"
@@ -287,7 +287,7 @@ def insert_uploaded_SAFE_tiles_to_graph(inserted_copernicus_catalog_gdf: gpd.Geo
                     "modification_date": row["ModificationDate"],
                     "external_s3_path": row["S3Path"],
                     "footprint": row["Footprint"],
-                    "local_blob_storage_path": f"{row['Id']}.SAFE.zip"
+                    "local_blob_storage_path": f"{row['Id']}/SAFE.zip"
                 }
             })
 
