@@ -11,10 +11,76 @@ from loguru import logger
 import matplotlib.pyplot as plt
 import pandas as pd
 import shapely
+import urllib3
 import geopandas as gpd
 import io
 import os
 import sqlite3
+
+def update_insert_geometry_parquet_metadata(gdf_to_insert: gpd.GeoDataFrame, client: Minio, blob_parquet: str = "sentinel_2_metadata/uploaded_sentinel_2_footprints.parquet"): 
+    
+    geospatial_bucket_found = client.bucket_exists("sentinel-2-data")
+    if not geospatial_bucket_found:
+        client.make_bucket("sentinel-2-data")
+        logger.info("Created bucket", "geospatial_bucket")
+    else:
+        logger.info("Bucket", "sentinel-2-data", "already exists") 
+    
+    gdf_to_insert['local_blob_storage_path'] = gdf_to_insert['Id'].apply(lambda x: f"{x}.SAFE.zip")
+
+    # Check to see if the parquet file exists:
+    try:
+        parquet_exists = True
+        parquet_response: urllib3.response.HTTPResponse = client.stat_object("sentinel-2-data", blob_parquet)
+        logger.info(f"Sentinel 2 footprint parquet already exists {parquet_response}")
+    
+    except Exception as e:
+        logger.info(f"{'sentinel_2_data/uploaded_sentinel_2_footprints.parquet'} did not exist in blob storage - creating it.")
+        logger.info(e.with_traceback(None))
+        parquet_exists = False
+
+    if parquet_exists:
+        # TODO: This can be set up to read the geopandas geodataframe directly from the minio client:
+        existing_parquet = client.get_object("sentinel-2-data", blob_parquet)
+        parquet_stream = io.BytesIO(existing_parquet.read())
+        parquet_stream.seek(0)
+        logger.info("Read in parquet file into memory buffer")
+
+        existing_parquet_gdf: gpd.GeoDataFrame = gpd.read_parquet(parquet_stream)
+
+        # Only inserting new footprints:
+        new_footprints_gdf = gdf_to_insert[~gdf_to_insert['Id'].isin(existing_parquet_gdf["Id"])]
+        if new_footprints_gdf.empty:
+            logger.info(f"No New Ids extracted from the gdf to insert - not modifying existing parquet file.")
+            return
+
+        logger.info(f"Length of input gdf {len(gdf_to_insert)} vs Length of gdf rows to add: {len(new_footprints_gdf)}")
+
+        new_parquet_gdf_to_upload: gpd.GeoDataFrame =  pd.concat([existing_parquet_gdf, new_footprints_gdf])
+
+    else:
+        logger.info("Building the parquet file from scratch")
+        new_parquet_gdf_to_upload: gpd.GeoDataFrame = gdf_to_insert.copy()
+
+    # Uploading the geodataframe to a buffer and streaming buffer to minio:
+    file_upload_buffer_stream = io.BytesIO()
+    new_parquet_gdf_to_upload.to_parquet(file_upload_buffer_stream, index=False, compression="None", write_covering_bbox=True, geometry_encoding="WKB")
+    file_upload_buffer_stream.seek(0)
+
+    try:
+        upload_result = client.put_object(
+            "sentinel-2-data", 
+            blob_parquet, 
+            file_upload_buffer_stream, 
+            length=file_upload_buffer_stream.getbuffer().nbytes,
+            content_type="application/vnd.apache.parquet"
+        )
+        logger.info(f"Uploaded new geoparquet file to blob storage")
+        logger.info(upload_result)
+    except Exception as e:
+        logger.error(e.with_traceback(None))
+        
+
 
 def get_sqlite_engine(uri: str, enable_spatial: bool = False) -> sa.engine.Engine:
     logger.info(f"SQLITE Version:")
@@ -125,7 +191,7 @@ def generate_geometry_from_catalogy_dict(geofootprint):
     aoi_polygon: Polygon = shapely.from_wkt(geofootprint.split(";")[1]) 
     return aoi_polygon
 
-def ingest_SAFE_files(static_client: Minio, unique_copernicus_catalog_gdf: gpd.GeoDataFrame, access_token: str) -> list[str]:
+def ingest_raw_SAFE_files_blob(static_client: Minio, unique_copernicus_catalog_gdf: gpd.GeoDataFrame, access_token: str) -> list[str]:
 
     uploaded_copernicus_catalog_ids = []
     for index, row in unique_copernicus_catalog_gdf.iterrows():
@@ -172,6 +238,9 @@ def ingest_SAFE_files(static_client: Minio, unique_copernicus_catalog_gdf: gpd.G
     logger.info(f"Tile Ids processed and added to que: {uploaded_copernicus_catalog_ids}")
     if len(uploaded_copernicus_catalog_ids) != len(unique_copernicus_catalog_gdf):
         logger.warning(f"There is a difference between the input tiles and the tiles that were processed and uploaded. Input: {len(unique_copernicus_catalog_gdf)} Output: {len(uploaded_copernicus_catalog_ids)}")
+    else:
+        logger.info(f"No difference between the uploaded ids and the input geodataframe - updating the metadata file tracking all footprints")
+        update_insert_geometry_parquet_metadata(unique_copernicus_catalog_gdf, static_client)
 
     return uploaded_copernicus_catalog_ids
 
@@ -195,7 +264,7 @@ def determine_unique_records(catalog_df: pd.DataFrame | gpd.GeoDataFrame, secret
 
     return unique_catalog_df
 
-def insert_uploaded_SAFE_tiles(inserted_copernicus_catalog_gdf: gpd.GeoDataFrame, secrets: Secrets) -> dict:
+def insert_uploaded_SAFE_tiles_to_graph(inserted_copernicus_catalog_gdf: gpd.GeoDataFrame, secrets: Secrets) -> dict:
 
     uploaded_SAFE_nodes = []
     for _, row in inserted_copernicus_catalog_gdf.iterrows():
@@ -216,8 +285,9 @@ def insert_uploaded_SAFE_tiles(inserted_copernicus_catalog_gdf: gpd.GeoDataFrame
                     "publication_date": row["PublicationDate"],
                     "eviction_date": row["EvictionDate"],
                     "modification_date": row["ModificationDate"],
-                    "s3_path": row["S3Path"],
+                    "external_s3_path": row["S3Path"],
                     "footprint": row["Footprint"],
+                    "local_blob_storage_path": f"{row['Id']}.SAFE.zip"
                 }
             })
 
@@ -238,7 +308,6 @@ def insert_uploaded_SAFE_tiles(inserted_copernicus_catalog_gdf: gpd.GeoDataFrame
         return None
 
 
-
 def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
 
     env_secrets: Secrets = load_secrets(os.environ.get("ENV", "dev"))
@@ -247,6 +316,9 @@ def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
     copernicus_catalog_gdf: gpd.GeoDataFrame = gpd.GeoDataFrame(copernicus_catalog_df, geometry="geometry", crs=4326)
     
     unique_copernicus_catalog_gdf = determine_unique_records(copernicus_catalog_gdf, env_secrets)
+    if unique_copernicus_catalog_gdf.empty:
+        logger.info(f"No unique records found to insert. Ending")
+        return
 
     # Step 3: Ingesting all of the items to the minio application:
     client = Minio(env_secrets['minio_url'], access_key=env_secrets['minio_access_key'], secret_key=env_secrets['minio_secret_key'], secure=False)
@@ -264,14 +336,15 @@ def process_sentinel_tiles(copernicus_catalog_df: pd.DataFrame):
     ).json()
     access_token = auth_response['access_token']
 
-    ingested_copernicus_ids: list[str] = ingest_SAFE_files(client, unique_copernicus_catalog_gdf, access_token)
+    # Insert all of the SAFE files to minio blob and a metadata parquet:
+    unique_copernicus_catalog_gdf.drop(columns=['@odata.mediaContentType'], inplace=True)
+    ingested_copernicus_ids: list[str] = ingest_raw_SAFE_files_blob(client, unique_copernicus_catalog_gdf, access_token)
     ingested_copernicus_catalog_gdf = unique_copernicus_catalog_gdf[unique_copernicus_catalog_gdf["Id"].isin(ingested_copernicus_ids)]
-
     logger.info(f"Copernicus datasets that have been ingested: {ingested_copernicus_ids}")
-    ingested_copernicus_catalog_gdf.drop(columns=['@odata.mediaContentType', 'geometry'], inplace=True)
     logger.info(ingested_copernicus_catalog_gdf)
 
-    uploaded_SAFE_nodes_response: dict | None = insert_uploaded_SAFE_tiles(ingested_copernicus_catalog_gdf, env_secrets)
+    # Uploading all records to the graph database:
+    uploaded_SAFE_nodes_response: dict | None = insert_uploaded_SAFE_tiles_to_graph(ingested_copernicus_catalog_gdf, env_secrets)
     if uploaded_SAFE_nodes_response is None:
         logger.error(f"Unable to insert tracking nodes into graph database")
     else:
