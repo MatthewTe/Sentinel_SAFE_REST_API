@@ -93,6 +93,11 @@ def insert_RBG_bands(sentinel_item: pystac.Item, minio_client: Minio, tc_driver:
 
 def download_footprints_from_aoi(aoi: typing.Union[shapely.Polygon | shapely.MultiPolygon], secrets: Secrets):
 
+    tc.update_settings(
+        RASTER_AWS_ACCESS_KEY=secrets['minio_access_key'],
+        RASTER_AWS_SECRET_KEY=secrets['minio_secret_key'],
+        RASTER_AWS_S3_ENDPOINT=secrets['minio_url']
+    )
     db_path = Path(secrets["terracotta_db"])
     driver: TerracottaDriver = tc.get_driver(db_path)
 
