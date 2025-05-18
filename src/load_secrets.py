@@ -1,28 +1,34 @@
 import os
 from loguru import logger
-from custom_types import Secrets
+from typing import TypedDict
 
-def load_secrets(env: str) -> Secrets:
+class Secrets(TypedDict):
+    minio_url: str
+    minio_access_key: str
+    minio_secret_key: str
+    terracotta_db: str
+
+def load_secrets(env: str) -> Secrets | Exception:
     if env == "dev":
         logger.info("Loaded in dev secrets")
         secrets: Secrets = {
-            "copernicus_username": os.environ.get("COPERNICUS_USERNAME_DEV"),
-            "copernicus_password": os.environ.get("COPERNICUS_PWD_DEV"),
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_DEV"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_DEV"),
             "minio_url": os.environ.get("MINIO_URL_DEV"), 
-            "neo4j_url": os.environ.get("API_NEO4J_URL_DEV")
+            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_DEV")
+
         }
     elif env == "prod":
         logger.info("Loaded in prod secrets")
         secrets: Secrets = {
-            "copernicus_username": os.environ.get("COPERNICUS_USERNAME_PROD"),
-            "copernicus_password": os.environ.get("COPERNICUS_PWD_PROD"),
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_PROD"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_PROD"),
-            "minio_url": os.environ.get("MINIO_URL_PROD"), 
-            "neo4j_url": os.environ.get("API_NEO4J_URL_PROD")
+            "minio_url": os.environ.get("MINIO_URL_PROD"),
+            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_PROD")
         }
+
+    else:
+        return ValueError(f"Environment type provided was not dev or prod it was {env} which is unsupported")
 
     return secrets
     
