@@ -2,23 +2,17 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: prod-minio
+    container_name: sentinel-2-minio
     ports:
       - "9000:9000"    
       - "9001:9001"
+    #volumes:
+    #  - minio_data:/data
     volumes:
-      - minio_data:/data
+      - /Volumes/T7/Sentinel_Rasters/minio_data:/data
     command: server /data --console-address ":9001"
+    user: "501:20"
 
-  neo4j:
-    image: neo4j:latest
-    container_name: neo4j-for-testing-SAFEs
-    ports:
-      - "7474:7474"
-      - "7687:7687"
-    environment:
-      - NEO4J_AUTH=neo4j/test_password
-
-volumes:
-  minio_data:
-    driver: local
+#volumes:
+#  minio_data:
+#    driver: local

@@ -26,7 +26,7 @@ class Sentinel2STACItem(typing.TypedDict):
     id: str
     properties: Sentine2STACProperties
 
-def insert_RBG_bands(sentinel_item: pystac.Item, minio_client: Minio, tc_driver: TerracottaDriver):
+def insert_RBG_bands(sentinel_item: pystac.Item, minio_client: Minio, aoi_name: str, tc_driver: TerracottaDriver):
     colour_band_mapping = {
         "red": "B04",
         "green": "B03",
@@ -70,8 +70,25 @@ def insert_RBG_bands(sentinel_item: pystac.Item, minio_client: Minio, tc_driver:
         logger.info(to_geotiff_results.stdout.decode("utf-8"))
 
         for colour, band in colour_band_mapping.items():
+            
+            local_filepath = f"{str(geotiff_output_subdir)}/{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif"
+
+            assert os.path.exists(local_filepath), logger.error(f"File {local_filepath} does not exist")
+            assert os.path.getsize(local_filepath) > 0, logger.error(f"File {local_filepath} is empty")
+
+            logger.info(f"{local_filepath}={os.path.getsize(local_filepath)}")
 
             with tc_driver.connect():
+
+                minio_client.fput_object(
+                    "sentinel-2-data",
+                    f"{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif",
+                    local_filepath,
+                    part_size=-1,
+                    content_type="image/tiff;subtype=geotiff"
+                )
+                logger.info(f"Uploaded {new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif to minio blob.")
+
                 tc_driver.insert(
                     {
                         "id": new_collected_tile['id'],
@@ -80,18 +97,12 @@ def insert_RBG_bands(sentinel_item: pystac.Item, minio_client: Minio, tc_driver:
                         "band": band
                     },
                     f"{str(geotiff_output_subdir)}/{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif",
-                    override_path=f"s3://sentinel-2-data/{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif"
+                    override_path=f"s3://sentinel-2-data/{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif",
+                    metadata={"aoi_name": aoi_name}
                 )
                 logger.info(f"Inserted metadata for tile {new_collected_tile['id']} for band {band}")
 
-                minio_client.fput_object(
-                    "sentinel-2-data",
-                    f"{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif",
-                    f"{str(geotiff_output_subdir)}/{new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif",
-                )
-                logger.info(f"Uploaded {new_collected_tile['id']}_{formatted_date}_{collected_grid_code}_{band}.tif to minio blob.")
-
-def download_footprints_from_aoi(aoi: typing.Union[shapely.Polygon | shapely.MultiPolygon], secrets: Secrets):
+def download_footprints_from_aoi(aoi: typing.Union[shapely.Polygon | shapely.MultiPolygon], aoi_name: str, secrets: Secrets):
 
     tc.update_settings(
         RASTER_AWS_ACCESS_KEY=secrets['minio_access_key'],
@@ -123,9 +134,9 @@ def download_footprints_from_aoi(aoi: typing.Union[shapely.Polygon | shapely.Mul
     geospatial_bucket_found = client.bucket_exists("sentinel-2-data")
     if not geospatial_bucket_found:
         client.make_bucket("sentinel-2-data")
-        logger.info("Created bucket", "geospatial_bucket")
+        logger.info("Created bucket geospatial_bucket")
     else:
-        logger.info("Bucket", "sentinel-2-data", "already exists") 
+        logger.info(f"Bucket sentinel-2-data already exists") 
 
     for item in sentinel_2a_search_results.items():
         existing_raster: dict = driver.get_datasets(where={"id":item.id})
@@ -136,6 +147,7 @@ def download_footprints_from_aoi(aoi: typing.Union[shapely.Polygon | shapely.Mul
         insert_RBG_bands(
             sentinel_item=item,
             minio_client=client,
+            aoi_name=aoi_name,
             tc_driver=driver
         )
 

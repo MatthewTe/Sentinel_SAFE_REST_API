@@ -1,0 +1,3 @@
+RASTER_AWS_ACCESS_KEY = "test_access_key"
+RASTER_AWS_SECRET_KEY = "test_secret_key"
+RASTER_AWS_S3_ENDPOINT = "127.0.0.1:9000"

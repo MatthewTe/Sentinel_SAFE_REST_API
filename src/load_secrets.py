@@ -7,6 +7,7 @@ class Secrets(TypedDict):
     minio_access_key: str
     minio_secret_key: str
     terracotta_db: str
+    db_uri: str
 
 def load_secrets(env: str) -> Secrets | Exception:
     if env == "dev":
@@ -15,7 +16,8 @@ def load_secrets(env: str) -> Secrets | Exception:
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_DEV"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_DEV"),
             "minio_url": os.environ.get("MINIO_URL_DEV"), 
-            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_DEV")
+            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_DEV"),
+            "db_uri": f"sqlite:///{os.environ.get('TERRACOTTA_DB_PATH_DEV')}"
 
         }
     elif env == "prod":
@@ -24,7 +26,8 @@ def load_secrets(env: str) -> Secrets | Exception:
             "minio_access_key": os.environ.get("MINIO_ACCESS_KEY_PROD"),
             "minio_secret_key": os.environ.get("MINIO_SECRET_KEY_PROD"),
             "minio_url": os.environ.get("MINIO_URL_PROD"),
-            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_PROD")
+            "terracotta_db": os.environ.get("TERRACOTTA_DB_PATH_PROD"),
+            "db_uri": f"sqlite:///{os.environ.get('TERRACOTTA_DB_PATH_PROD')}"
         }
 
     else:
